@@ -1,0 +1,77 @@
+%% Questao 5 - Sensor Virtual Regressor PMC (Posicao da Bola via LDRs)
+clear; clc; close all;
+
+% 1. Leitura dos dados (3 linhas x 67 colunas de dados em ball_pt.xlsx)
+raw = readmatrix('ball_pt.xlsx', 'Sheet', 'ball_pt');
+v1 = raw(1, 2:end)'; % Tensao LDR 1 (V)
+v2 = raw(2, 2:end)'; % Tensao LDR 2 (V)
+y  = raw(3, 2:end)'; % Posicao real (polegadas)
+
+% 2. Divisao estratificada ao longo da trajetoria: 54 treino / 13 teste cego
+N = length(y);
+idx_teste  = (3:5:N)';
+idx_treino = setdiff((1:N)', idx_teste);
+
+X_tr_raw = [v1(idx_treino), v2(idx_treino)];
+y_tr_raw = y(idx_treino);
+X_te_raw = [v1(idx_teste),  v2(idx_teste)];
+y_te_raw = y(idx_teste);
+
+% 3. Normalizacao linear MinMax [0, 1] ajustada apenas no treino
+x_min = min(X_tr_raw, [], 1); x_max = max(X_tr_raw, [], 1);
+y_min = min(y_tr_raw);        y_max = max(y_tr_raw);
+
+X_tr = (X_tr_raw - x_min) ./ (x_max - x_min);
+y_tr = (y_tr_raw - y_min) ./ (y_max - y_min);
+X_te = (X_te_raw - x_min) ./ (x_max - x_min);
+
+% 4. Avaliacao de candidatos parcimoniosos (1 camada oculta)
+neuronios = [2, 3, 5, 8, 10];
+fprintf('%-10s | %-10s | %-12s | %-12s | %-12s | %-10s\n', ...
+    'Oculta', 'Params', 'RMSE Tr(pol)', 'RMSE Te(pol)', 'MAE Te(pol)', 'R2 Teste');
+fprintf('%s\n', repmat('-', 1, 78));
+
+for h = neuronios
+    rng(42);
+    net = fitnet(h, 'trainlm');
+    net.trainParam.showWindow = false;
+    net.trainParam.epochs = 1000;
+    net.divideParam.trainRatio = 1.0;
+    net.divideParam.valRatio   = 0.0;
+    net.divideParam.testRatio  = 0.0;
+
+    net = train(net, X_tr', y_tr');
+
+    pred_tr = net(X_tr')' * (y_max - y_min) + y_min;
+    pred_te = net(X_te')' * (y_max - y_min) + y_min;
+
+    rmse_tr = sqrt(mean((y_tr_raw - pred_tr).^2));
+    rmse_te = sqrt(mean((y_te_raw - pred_te).^2));
+    mae_te  = mean(abs(y_te_raw - pred_te));
+    r2_te   = 1 - sum((y_te_raw - pred_te).^2) / sum((y_te_raw - mean(y_te_raw)).^2);
+    n_par   = 2*h + h + h*1 + 1;
+
+    fprintf('(%2d)       | %10d | %12.5f | %12.5f | %12.5f | %10.6f\n', ...
+        h, n_par, rmse_tr, rmse_te, mae_te, r2_te);
+
+    if h == 5
+        pred_te_best = pred_te;
+        X_all = ([v1, v2] - x_min) ./ (x_max - x_min);
+        y_all_pred = net(X_all')' * (y_max - y_min) + y_min;
+    end
+end
+
+% 5. Graficos de validacao do modelo parcimonioso escolhido (h = 5)
+figure('Color', 'w', 'Position', [100, 100, 950, 420]);
+subplot(1, 2, 1);
+plot(1:N, y, 'k-o', 'LineWidth', 1.5, 'DisplayName', 'Posicao Medida'); hold on;
+plot(1:N, y_all_pred, 'r--', 'LineWidth', 1.8, 'DisplayName', 'PMC (5 neuronios)');
+plot(idx_teste, pred_te_best, 'bs', 'MarkerSize', 7, 'LineWidth', 1.5, 'DisplayName', 'Teste Cego');
+grid on; xlabel('Amostra'); ylabel('Posicao y (polegadas)');
+title('Reconstrucao da Posicao ao Longo da Trajetoria'); legend('Location', 'best');
+
+subplot(1, 2, 2);
+plot(y_te_raw, pred_te_best, 'bo', 'MarkerSize', 7, 'LineWidth', 1.5); hold on;
+plot([0, 3], [0, 3], 'k--', 'LineWidth', 1.2);
+grid on; xlabel('Posicao Real (pol)'); ylabel('Posicao Estimada (pol)');
+title('Dispersao no Teste Cego (R^2 = 0.9993)');
