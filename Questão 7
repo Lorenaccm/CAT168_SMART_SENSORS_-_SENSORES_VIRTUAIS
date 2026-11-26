@@ -1,0 +1,113 @@
+%% Questao 7 - Previsor Neural Recursivo de Carga Eletrica (1 a 24 passos)
+clear; clc; close all;
+
+% 1. Leitura da serie temporal de Potencia Ativa (MW)
+dados = readmatrix('carga_eletrica.xlsx');
+serie = dados(~isnan(dados)); % 936 amostras horarias (39 dias)
+
+% 2. Divisao Treino (32 dias = 768h) e Teste Cego (7 dias = 168h)
+n_teste_total = 168;
+dados_treino = serie(1:end - n_teste_total);
+
+% 3. Definicao dos previsores candidatos (lags e camadas ocultas)
+candidatos = {
+    'Cand. 1', [1, 2, 24],              [10];
+    'Cand. 2', [1, 2, 24],              [20, 10];
+    'Cand. 3', [1, 2, 3, 23, 24, 25],   [15];
+    'Cand. 4', [1, 2, 24, 168],         [15]
+};
+
+fprintf('%-10s | %-22s | %-10s | %-12s | %-12s | %-11s | %-11s\n', ...
+    'Candidato', 'Lags', 'Topologia', 'MAPE 7d (%)', 'RMSE 7d(MW)', 'MAPE D39(%)', 'RMSE D39(MW)');
+fprintf('%s\n', repmat('-', 1, 98));
+
+figure('Color', 'w', 'Position', [100, 100, 950, 450]);
+horas = 1:24;
+y_real_39 = serie(end - 23:end);
+plot(horas, y_real_39, 'k-o', 'LineWidth', 2, 'DisplayName', 'Potencia Medida (Real)');
+hold on; grid on;
+estilos = {'--', '-.', '-', ':'};
+
+for c = 1:size(candidatos, 1)
+    nome   = candidatos{c, 1};
+    lags   = candidatos{c, 2};
+    hidden = candidatos{c, 3};
+    
+    % Montar matrizes de treino (entradas nas colunas para fitnet)
+    [X_tr_raw, y_tr_raw] = criar_dataset(dados_treino, lags);
+    
+    % Normalizacao MinMax [0, 1] ajustada apenas no treino
+    x_min = min(X_tr_raw, [], 1); x_max = max(X_tr_raw, [], 1);
+    y_min = min(y_tr_raw);        y_max = max(y_tr_raw);
+    
+    X_tr = (X_tr_raw - x_min) ./ (x_max - x_min);
+    y_tr = (y_tr_raw - y_min) ./ (y_max - y_min);
+    
+    % Criacao e treinamento da rede PMC (Levenberg-Marquardt)
+    rng(42);
+    net = fitnet(hidden, 'trainlm');
+    net.trainParam.showWindow = false;
+    net.trainParam.epochs = 500;
+    net.divideParam.trainRatio = 0.85;
+    net.divideParam.valRatio   = 0.15;
+    net.divideParam.testRatio  = 0.00;
+    
+    net = train(net, X_tr', y_tr');
+    
+    % Teste cego recursivo nas 7 janelas de 24 horas
+    mapes = zeros(7, 1);
+    rmses = zeros(7, 1);
+    for dia = 1:7
+        idx_ini = length(dados_treino) + (dia - 1) * 24;
+        hist_ini = serie(1:idx_ini);
+        y_true_24 = serie(idx_ini + 1 : idx_ini + 24);
+        
+        y_pred_24 = previsao_recursiva(net, hist_ini, lags, 24, x_min, x_max, y_min, y_max);
+        
+        mapes(dia) = mean(abs(y_true_24 - y_pred_24) ./ abs(y_true_24)) * 100;
+        rmses(dia) = sqrt(mean((y_true_24 - y_pred_24).^2));
+        
+        if dia == 7
+            y_pred_39 = y_pred_24;
+        end
+    end
+    
+    fprintf('%-10s | %-22s | %-10s | %11.2f | %12.2f | %11.2f | %11.2f\n', ...
+        nome, mat2str(lags), mat2str(hidden), mean(mapes), mean(rmses), mapes(7), rmses(7));
+    
+    plot(horas, y_pred_39, estilos{c}, 'LineWidth', 1.8, ...
+        'DisplayName', sprintf('%s - Lags %s', nome, mat2str(lags)));
+end
+
+title('Teste Cego Recursivo (1 a 24 passos a frente) - Ultimo Dia da Serie');
+xlabel('Horizonte de Previsao (Passos / Horas a frente)');
+ylabel('Potencia Ativa - PA (MW)');
+xticks(1:24);
+legend('Location', 'best');
+
+%% Funcoes Auxiliares
+function [X, y] = criar_dataset(dados, lags)
+    max_lag = max(lags);
+    N = length(dados) - max_lag;
+    X = zeros(N, length(lags));
+    y = zeros(N, 1);
+    idx = 1;
+    for k = (max_lag + 1):length(dados)
+        X(idx, :) = dados(k - lags)';
+        y(idx) = dados(k);
+        idx = idx + 1;
+    end
+end
+
+function previsoes = previsao_recursiva(net, hist_inicial, lags, passos, x_min, x_max, y_min, y_max)
+    historico = hist_inicial(:);
+    previsoes = zeros(passos, 1);
+    for p = 1:passos
+        entrada = historico(end - lags + 1)';
+        entrada_norm = (entrada - x_min) ./ (x_max - x_min);
+        pred_norm = net(entrada_norm');
+        pred = pred_norm * (y_max - y_min) + y_min;
+        previsoes(p) = pred;
+        historico = [historico; pred]; % Realimentacao recursiva
+    end
+end
